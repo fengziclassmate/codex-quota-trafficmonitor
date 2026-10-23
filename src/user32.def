@@ -1,4 +1,13 @@
 LIBRARY user32.dll
 EXPORTS
-wsprintfW
+CallWindowProcW
+EnumWindows
+GetAncestor
+GetClassNameW
+GetParent
+GetWindowLongPtrW
+GetWindowThreadProcessId
+IsWindow
 MessageBoxW
+SetWindowLongPtrW
+wsprintfW

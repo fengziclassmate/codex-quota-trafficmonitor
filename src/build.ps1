@@ -7,7 +7,7 @@ $pluginDirectory = Join-Path (Split-Path -Parent $PSScriptRoot) 'plugins'
 New-Item -ItemType Directory -Path $buildDirectory, $pluginDirectory -Force | Out-Null
 $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $buildDirectory 'zig-cache'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll "/out:$buildDirectory\CodexQuotaBridge.exe" "$PSScriptRoot\Bridge.cs"
+& $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll "/out:$buildDirectory\CodexQuotaBridge.exe" "$PSScriptRoot\Bridge.cs" "$PSScriptRoot\Monitor.cs"
 if ($LASTEXITCODE -ne 0) { throw 'C# compilation failed.' }
 & $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll "/r:$buildDirectory\CodexQuotaBridge.exe" "/out:$buildDirectory\Tests.exe" "$PSScriptRoot\Tests.cs"
 if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed.' }

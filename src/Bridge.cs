@@ -10,7 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 
-public static class Bridge
+public static partial class Bridge
 {
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
     static string DataDir { get { return Environment.GetEnvironmentVariable("CODEX_QUOTA_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexQuota"); } }
@@ -18,7 +18,7 @@ public static class Bridge
     static Dictionary<string, object> Object(object value) { return value as Dictionary<string, object>; }
     static object Field(Dictionary<string, object> obj, string key) { object value; return obj != null && obj.TryGetValue(key, out value) ? value : null; }
     static string Text(object value) { return value == null ? "" : Convert.ToString(value, CultureInfo.InvariantCulture); }
-    static string TimeText(object value) { return value == null ? "未提供" : DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(value)).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz"); }
+    static string TimeText(object value) { return value == null ? "未知" : DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(value)).ToLocalTime().ToString("yyyy-MM-dd HH:mm"); }
     static string Flat(string value) { return value.Replace("\r", "").Replace("\n", " | "); }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool MoveFileEx(string source, string destination, int flags);
@@ -83,7 +83,7 @@ public static class Bridge
         var secondary = Object(Field(bucket, "secondary"));
         var windows = new[] { primary, secondary }.Where(w => w != null).ToArray();
         var percentages = new List<string>();
-        var lines = new List<string> { "Codex 订阅额度", "所有时间使用本机时区" };
+        var lines = new List<string> { "Codex 额度" };
         long nextReset = 0;
         foreach (var window in windows)
         {
@@ -107,27 +107,25 @@ public static class Bridge
         var credits = Object(Field(bucket, "credits"));
         if (credits != null)
         {
-            if (Field(credits, "balance") != null) lines.Add("额外 Credits：" + Text(Field(credits, "balance")));
+            if (Field(credits, "balance") != null && Text(Field(credits, "balance")) != "0") lines.Add("额外 Credits：" + Text(Field(credits, "balance")));
             if (Field(credits, "unlimited") is bool && (bool)Field(credits, "unlimited")) lines.Add("Credits：不限额");
         }
         var resets = Object(Field(result, "rateLimitResetCredits"));
-        if (resets == null || Field(resets, "availableCount") == null) lines.Add("可用重置次数：接口未提供");
+        if (resets == null || Field(resets, "availableCount") == null) lines.Add("可用重置次数：未知");
         else
         {
             lines.Add("可用重置次数：" + Text(Field(resets, "availableCount")));
             object[] details = Field(resets, "credits") as object[];
-            if (details == null) lines.Add("重置次数到期：接口未提供明细");
+            if (details == null) lines.Add("重置到期：未知");
             else foreach (object row in details)
             {
                 var credit = Object(row);
-                string status = Text(Field(credit, "status"));
-                lines.Add("重置权益 " + (Text(Field(credit, "title")) == "" ? "未命名" : Text(Field(credit, "title"))) + "：" + (status == "available" ? "可用" : status));
                 lines.Add("到期时间：" + TimeText(Field(credit, "expiresAt")));
             }
-            if (details != null && details.Length < Convert.ToInt32(Field(resets, "availableCount"))) lines.Add("接口只返回部分权益明细；次数以可用总数为准。");
+            if (details != null && details.Length < Convert.ToInt32(Field(resets, "availableCount"))) lines.Add("重置明细：" + details.Length + "/" + Text(Field(resets, "availableCount")));
         }
-        lines.Add("额度数据刷新：" + TimeText(now));
-        lines.Add("下一次自动查询：" + TimeText(now + 120));
+        lines.Add("更新：" + DateTimeOffset.FromUnixTimeSeconds(now).ToLocalTime().ToString("HH:mm:ss"));
+        lines.Add("下次更新：" + DateTimeOffset.FromUnixTimeSeconds(now + 120).ToLocalTime().ToString("HH:mm:ss"));
         return new Dictionary<string, string> { { "remaining", percentages.Count == 0 ? "--" : string.Join("/", percentages) }, { "reset_at", nextReset.ToString() }, { "updated", now.ToString() }, { "tooltip", string.Join("\u2028", lines.Select(Flat)) }, { "error", "" } };
     }
 
@@ -147,7 +145,7 @@ public static class Bridge
             process = new Process { StartInfo = new ProcessStartInfo(FindCodex(codex), "app-server --listen stdio://") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 } };
             process.Start();
             errors = process.StandardError.ReadToEndAsync();
-            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.1.0" } });
+            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.1.1" } });
             process.StandardInput.WriteLine("{\"method\":\"initialized\",\"params\":{}}");
             process.StandardInput.Flush();
             var result = Rpc(process, 2, "account/rateLimits/read", new { });
@@ -182,6 +180,11 @@ public static class Bridge
         public long ownerStarted;
     }
 
+    static string PendingPhase(StatusData state)
+    {
+        return state.tools.Values.Contains("running") ? "running" : state.tools.Values.Contains("waiting_input") ? "waiting_input" : state.tools.Values.Contains("waiting_approval") ? "waiting_approval" : "thinking";
+    }
+
     public static void ApplyEvent(StatusData state, Dictionary<string, object> input)
     {
         string kind = Text(Field(input, "hook_event_name"));
@@ -207,7 +210,7 @@ public static class Bridge
         else if (kind == "PostToolUse")
         {
             string key = id == "" ? tool : id;
-            if (!(tool.IndexOf("request_user_input_async", StringComparison.OrdinalIgnoreCase) >= 0 && state.tools.ContainsKey(key))) { state.tools.Remove(key); state.toolNames.Remove(key); }
+            state.tools.Remove(key); state.toolNames.Remove(key);
             state.tools.Remove("permission:" + tool);
         }
         else if (kind == "Stop" || kind == "Interrupt" || kind == "SessionEnd")
@@ -217,7 +220,7 @@ public static class Bridge
             state.phase = kind == "Stop" ? "completed" : kind == "Interrupt" ? "interrupted" : "idle";
             return;
         }
-        state.phase = state.tools.Values.Contains("waiting_input") ? "waiting_input" : state.tools.Values.Contains("waiting_approval") ? "waiting_approval" : state.tools.Count > 0 ? "running" : "thinking";
+        state.phase = PendingPhase(state);
     }
 
     [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr reserved1, peb, reserved2a, reserved2b, pid, parent; }
@@ -259,7 +262,7 @@ public static class Bridge
                 ApplyEvent(state, input);
                 Process owner = Owner();
                 if (owner != null) { state.owner = owner.Id; state.ownerStarted = owner.StartTime.ToFileTimeUtc(); }
-                WriteIni(path, new Dictionary<string, string> { { "phase", state.phase }, { "updated", UnixNow.ToString() }, { "owner", state.owner.ToString() }, { "owner_started", state.ownerStarted.ToString() }, { "origin", "hooks" }, { "state_json", Json.Serialize(state) } });
+                WriteIni(path, new Dictionary<string, string> { { "phase", state.phase }, { "updated", UnixNow.ToString() }, { "updated_ms", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString() }, { "owner", state.owner.ToString() }, { "owner_started", state.ownerStarted.ToString() }, { "origin", "hooks" }, { "state_json", Json.Serialize(state) } });
             }
             finally { mutex.ReleaseMutex(); }
         }
@@ -292,7 +295,7 @@ public static class Bridge
             else if (kind == "message" && Text(Field(payload, "role")) == "user")
             {
                 foreach (string key in state.tools.Keys.Where(k => state.tools[k] == "waiting_input").ToArray()) { state.tools.Remove(key); state.toolNames.Remove(key); }
-                state.phase = state.tools.Count > 0 ? "running" : "thinking";
+                state.phase = PendingPhase(state);
                 return;
             }
             else return;
@@ -405,6 +408,7 @@ public static class Bridge
         {
             if (args.Length == 1 && args[0] == "enable") return ConfigureHooks(true);
             if (args.Length == 1 && args[0] == "disable") return ConfigureHooks(false);
+            if (args.Length == 2 && args[0] == "monitor") return Monitor(int.Parse(args[1], CultureInfo.InvariantCulture));
             if (args.Length == 3 && args[0] == "watch") return Watch(args[1], int.Parse(args[2], CultureInfo.InvariantCulture));
             if (args.Length > 0 && args[0] == "quota") return Quota(args[1], args.Length > 2 ? args[2] : "");
             if (args.Length != 0) throw new ArgumentException("Usage: CodexQuotaBridge.exe [quota OUTPUT_INI [CODEX_EXE]]");

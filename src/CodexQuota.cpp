@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commctrl.h>
 #include "PluginInterface.h"
 extern "C" { int _fltused = 0; }
 
@@ -20,16 +21,23 @@ extern "C" void* memcpy(void* destination, const void* source, decltype(sizeof(0
 static HMODULE module;
 static SRWLOCK stateLock = SRWLOCK_INIT;
 static INIT_ONCE init = INIT_ONCE_STATIC_INIT;
-static wchar_t directory[2048], config[2048], dataDirectory[2048], quotaPath[2048];
+static wchar_t directory[2048], config[2048], dataDirectory[2048], quotaPath[2048], activityPath[2048];
 static wchar_t values[3][128] = { L"...", L"未连接", L"--" };
 static wchar_t tooltip[8192] = L"正在读取 Codex 额度。";
 static wchar_t queryError[256];
 static HANDLE child, childJob;
+static HANDLE monitorChild;
+static ULONGLONG monitorAttempt;
 static ULONGLONG lastAttempt, childStarted;
 static DWORD viewTls;
 
 struct View { View* next; wchar_t value[3][128]; wchar_t tooltip[8192]; };
 static View* views;
+static HWND tipWindow;
+static WNDPROC originalTipProc;
+static wchar_t tipText[2][8192], activityText[4096];
+static int tipIndex;
+static bool tipSized;
 
 static View* CurrentView() {
     auto view = static_cast<View*>(TlsGetValue(viewTls));
@@ -55,6 +63,46 @@ static unsigned long long Number(const wchar_t* text) {
     for (; *text >= L'0' && *text <= L'9'; ++text) number = number * 10 + (*text - L'0');
     return number;
 }
+
+static LRESULT CALLBACK TooltipProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    WNDPROC original = originalTipProc;
+    if (message == TTM_UPDATETIPTEXTW) {
+        AcquireSRWLockShared(&stateLock);
+        bool unchanged = !lstrcmpW(tipText[tipIndex], tooltip);
+        int next = unchanged ? tipIndex : 1 - tipIndex;
+        if (!unchanged) lstrcpynW(tipText[next], tooltip, 8192);
+        ReleaseSRWLockShared(&stateLock);
+        auto source = reinterpret_cast<TOOLINFOW*>(lParam);
+        TOOLINFOW info{};
+        memcpy(&info, source, source->cbSize < sizeof(info) ? source->cbSize : sizeof(info));
+        info.lpszText = tipText[next];
+        if (!tipSized) { CallWindowProcW(original, window, TTM_SETMAXTIPWIDTH, 0, 440); tipSized = true; }
+        LRESULT result = CallWindowProcW(original, window, message, wParam, reinterpret_cast<LPARAM>(&info));
+        tipIndex = next;
+        return result;
+    }
+    LRESULT result = CallWindowProcW(original, window, message, wParam, lParam);
+    if (message == WM_NCDESTROY && window == tipWindow) { tipWindow = nullptr; originalTipProc = nullptr; tipText[0][0] = tipText[1][0] = 0; tipSized = false; }
+    return result;
+}
+
+static BOOL CALLBACK FindTooltip(HWND window, LPARAM) {
+    DWORD process = 0; GetWindowThreadProcessId(window, &process);
+    if (process != GetCurrentProcessId()) return TRUE;
+    wchar_t name[64]; GetClassNameW(window, name, 64);
+    if (lstrcmpW(name, L"tooltips_class32")) return TRUE;
+    HWND owner = GetParent(window);
+    HWND root = GetAncestor(owner, GA_ROOT);
+    GetClassNameW(root, name, 64);
+    if (lstrcmpW(name, L"Shell_TrayWnd") && lstrcmpW(name, L"Shell_SecondaryTrayWnd")) return TRUE;
+    originalTipProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window, GWLP_WNDPROC));
+    if (!originalTipProc) return TRUE;
+    if (!SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TooltipProcedure))) { originalTipProc = nullptr; return TRUE; }
+    tipWindow = window;
+    return FALSE;
+}
+
+static void InstallTooltip() { if (!IsWindow(tipWindow)) EnumWindows(FindTooltip, 0); }
 
 static unsigned long long Now() {
     FILETIME value;
@@ -87,49 +135,33 @@ static bool OwnerAlive(const wchar_t* file) {
     return time.QuadPart == Number(started);
 }
 
-static void Status() {
-    // shortcut: only main-chat lifecycle events are tracked; hosted tools may not emit tool hooks.
-    auto path = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, 4096));
-    auto pattern = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, 4096));
-    if (!path || !pattern) { if (path) HeapFree(GetProcessHeap(), 0, path); if (pattern) HeapFree(GetProcessHeap(), 0, pattern); return; }
-    Join(pattern, dataDirectory, L"status\\*.ini");
-    WIN32_FIND_DATAW item;
-    HANDLE found = FindFirstFileW(pattern, &item);
-    int thinking = 0, running = 0, waitingInput = 0, waitingApproval = 0, connected = 0, observed = 0;
-    unsigned long long recentCompleted = 0, recentInterrupted = 0;
-    unsigned long long now = Now();
-    if (found != INVALID_HANDLE_VALUE) {
-        do {
-            Join(path, dataDirectory, L"status");
-            int offset = lstrlenW(path); path[offset++] = L'\\';
-            lstrcpynW(path + offset, item.cFileName, 2048 - offset);
-            wchar_t phase[64], updated[64];
-            GetPrivateProfileStringW(L"data", L"phase", L"", phase, 64, path);
-            GetPrivateProfileStringW(L"data", L"updated", L"0", updated, 64, path);
-            auto at = Number(updated);
-            if (!lstrcmpW(phase, L"completed") && at > recentCompleted) recentCompleted = at;
-            if (!lstrcmpW(phase, L"interrupted") && at > recentInterrupted) recentInterrupted = at;
-            if (!OwnerAlive(path)) continue;
-            ++connected;
-            wchar_t origin[32]; GetPrivateProfileStringW(L"data", L"origin", L"hooks", origin, 32, path);
-            if (!lstrcmpW(origin, L"transcript")) ++observed;
-            if (!lstrcmpW(phase, L"thinking")) ++thinking;
-            else if (!lstrcmpW(phase, L"running")) ++running;
-            else if (!lstrcmpW(phase, L"waiting_input")) ++waitingInput;
-            else if (!lstrcmpW(phase, L"waiting_approval")) ++waitingApproval;
-        } while (FindNextFileW(found, &item));
-        FindClose(found);
+static void StartMonitor() {
+    auto storage = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 12288));
+    if (!storage) return;
+    wchar_t* executable = storage; wchar_t* command = storage + 2048;
+    Join(executable, directory, L"CodexQuotaBridge.exe");
+    wsprintfW(command, L"\"%s\" monitor %lu", executable, GetCurrentProcessId());
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (CreateProcessW(executable, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, directory, &startup, &process)) {
+        monitorChild = process.hProcess; CloseHandle(process.hThread);
     }
-    const wchar_t* label = waitingInput ? L"等待输入" : waitingApproval ? L"批准/执行" : running ? L"运行中" : thinking ? L"思考中" : recentInterrupted && now < recentInterrupted + 60 ? L"已中断" : recentCompleted && now < recentCompleted + 60 ? L"已完成" : connected ? L"空闲" : L"未连接";
-    lstrcpynW(values[1], label, 128);
-    wchar_t summary[256];
-    wsprintfW(summary, L"\n\n任务状态：%s\n思考 %d · 运行 %d · 等待输入 %d · 批准/执行 %d", label, thinking, running, waitingInput, waitingApproval);
-    Append(tooltip, summary);
-    Append(tooltip, L"\n状态来自本机主聊天的生命周期事件，随 TrafficMonitor 监测周期更新。");
-    if (observed) Append(tooltip, L"\n包含只读会话事件兼容监测：此来源不能区分批准等待与工具执行。");
-    if (waitingApproval) Append(tooltip, L"\n批准请求发出后保持此标记，直到工具返回；批准后的执行也包含在此阶段。");
-    if (!connected) Append(tooltip, L"\n如需启用状态监测，请运行 Enable-Status.cmd，再在 Codex 的 /hooks 中信任监听 Hooks。");
-    HeapFree(GetProcessHeap(), 0, path); HeapFree(GetProcessHeap(), 0, pattern);
+    HeapFree(GetProcessHeap(), 0, storage);
+    monitorAttempt = GetTickCount64();
+}
+
+static void Status() {
+    wchar_t updated[64];
+    GetPrivateProfileStringW(L"data", L"updated", L"0", updated, 64, activityPath);
+    if (!OwnerAlive(activityPath) || Now() > Number(updated) + 10) {
+        lstrcpynW(values[1], monitorChild ? L"读取中" : L"状态不可用", 128);
+        Append(tooltip, L"\n\n任务："); Append(tooltip, values[1]);
+        return;
+    }
+    GetPrivateProfileStringW(L"data", L"label", L"状态不可用", values[1], 128, activityPath);
+    GetPrivateProfileStringW(L"data", L"tooltip", L"", activityText, 4096, activityPath);
+    for (auto p = activityText; *p; ++p) if (*p == 0x2028) *p = L'\n';
+    Append(tooltip, L"\n\n"); Append(tooltip, activityText);
 }
 
 static void StartQuota() {
@@ -180,7 +212,7 @@ public:
         ReleaseSRWLockShared(&stateLock);
         return view->value[index];
     }
-    const wchar_t* GetItemValueSampleText() const override { return index == 0 ? L"100%/100%" : index == 1 ? L"批准/执行" : L"99天23时"; }
+    const wchar_t* GetItemValueSampleText() const override { return index == 0 ? L"100%/100%" : index == 1 ? L"批准/执行 99" : L"99天23时"; }
     int OnMouseEvent(MouseEventType type, int, int, void* window, int) override {
         if (type != MT_LCLICKED) return 0;
         View* view = CurrentView(); if (!view) return 0;
@@ -199,7 +231,7 @@ public:
         case TMI_NAME: return L"Codex 状态与额度";
         case TMI_DESCRIPTION: return L"ChatGPT 订阅额度、重置时间与次数，以及 Codex 生命周期状态";
         case TMI_AUTHOR: return L"Local Codex Quota";
-        case TMI_VERSION: return L"0.1.0";
+        case TMI_VERSION: return L"0.1.1";
         default: return L"";
         }
     }
@@ -210,6 +242,8 @@ public:
     }
     void DataRequired() override {
         AcquireSRWLockExclusive(&stateLock);
+        if (monitorChild && WaitForSingleObject(monitorChild, 0) == WAIT_OBJECT_0) { CloseHandle(monitorChild); monitorChild = nullptr; }
+        if (!monitorChild && (!monitorAttempt || GetTickCount64() - monitorAttempt >= 30000)) StartMonitor();
         if (child && (WaitForSingleObject(child, 0) == WAIT_OBJECT_0 || GetTickCount64() - childStarted > 60000)) {
             bool timedOut = WaitForSingleObject(child, 0) != WAIT_OBJECT_0;
             DWORD code = 0;
@@ -250,6 +284,7 @@ public:
         if (!child && (!lastAttempt || GetTickCount64() - lastAttempt >= 120000)) StartQuota();
         if (queryError[0]) { Append(tooltip, L"\n"); Append(tooltip, queryError); }
         ReleaseSRWLockExclusive(&stateLock);
+        InstallTooltip();
     }
     int GetCommandCount() override { return 1; }
     const wchar_t* GetCommandName(int index) override { return index == 0 ? L"刷新 Codex 额度" : nullptr; }
@@ -259,6 +294,7 @@ public:
 alignas(Plugin) static unsigned char pluginStorage[sizeof(Plugin)];
 static BOOL CALLBACK Initialize(PINIT_ONCE, PVOID, PVOID*) {
     GetModuleFileNameW(module, directory, 2048);
+    HMODULE pinned; GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, directory, &pinned);
     for (int i = lstrlenW(directory) - 1; i >= 0; --i) if (directory[i] == L'\\') { directory[i] = 0; break; }
     Join(config, directory, L"CodexQuota.ini");
     if (!GetEnvironmentVariableW(L"CODEX_QUOTA_DATA_DIR", dataDirectory, 2048)) {
@@ -267,6 +303,7 @@ static BOOL CALLBACK Initialize(PINIT_ONCE, PVOID, PVOID*) {
         lstrcpynW(dataDirectory + offset, L"\\CodexQuota", 2048 - offset);
     }
     Join(quotaPath, dataDirectory, L"quota.ini");
+    Join(activityPath, dataDirectory, L"activity.ini");
     viewTls = TlsAlloc();
     if (viewTls == TLS_OUT_OF_INDEXES) return FALSE;
     new(pluginStorage) Plugin();
@@ -281,6 +318,7 @@ extern "C" __declspec(dllexport) ITMPlugin* TMPluginGetInstance() {
 extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) module = instance;
     if (reason == DLL_PROCESS_DETACH) {
+        if (monitorChild) { TerminateProcess(monitorChild, 0); CloseHandle(monitorChild); }
         if (childJob) CloseHandle(childJob);
         if (child) CloseHandle(child);
         while (views) { View* next = views->next; HeapFree(GetProcessHeap(), 0, views); views = next; }
