@@ -123,6 +123,9 @@ public static partial class Bridge
 
     static int Monitor(int hostId)
     {
+        // Codex persists Windows extended paths; .NET's legacy mode rejects their prefix.
+        AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
+        AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
         string codexDirectory = Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
         var host = Process.GetProcessById(hostId); var self = Process.GetCurrentProcess();
         var readers = new Dictionary<string, ActiveTranscript>();

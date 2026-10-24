@@ -231,7 +231,7 @@ public:
         case TMI_NAME: return L"Codex 状态与额度";
         case TMI_DESCRIPTION: return L"ChatGPT 订阅额度、重置时间与次数，以及 Codex 生命周期状态";
         case TMI_AUTHOR: return L"Local Codex Quota";
-        case TMI_VERSION: return L"0.1.1";
+        case TMI_VERSION: return L"0.1.2";
         default: return L"";
         }
     }

@@ -15,7 +15,7 @@
 
 从旧版升级时先退出 TrafficMonitor，再替换 **DLL 和 EXE 两个文件**。保留自己的 `config.ini` 和 `plugins/CodexQuota.ini`。
 
-运行环境：Windows 10/11 x64、x64 TrafficMonitor、.NET Framework 4.6 或更新版本，以及已通过 ChatGPT 账户登录的 Codex CLI 或 Codex Desktop。本次实测环境为 Windows build 26300、TrafficMonitor 1.86、Codex CLI 0.163.0-alpha.11.2；其他系统版本的任务栏兼容性由 TrafficMonitor 决定。
+运行环境：Windows 10/11 x64、x64 TrafficMonitor、.NET Framework 4.6.2 或更新版本，以及已通过 ChatGPT 账户登录的 Codex CLI 或 Codex Desktop。本次实测环境为 Windows build 26300、TrafficMonitor 1.86、Codex CLI 0.163.0-alpha.11.2；其他系统版本的任务栏兼容性由 TrafficMonitor 决定。
 
 便携包默认只显示剩余额度、任务状态、重置倒计时。单击打开详情，悬停查看完整信息，插件右键菜单可手动刷新额度。已有宿主的用户可取消其他任务栏项目；请保留宿主的“显示提示信息”选项，插件会将任务栏提示内容替换为 Codex 信息。
 
@@ -37,6 +37,8 @@ codex_path=C:\path\to\codex.exe
 ## 自动监听所有聊天
 
 自 v0.1.1 起，状态监听随 TrafficMonitor 自动启动。**已有聊天和新聊天都自动纳入，不需要逐个指定 JSONL 文件或重新打开聊天。** 监听器随宿主退出。
+
+v0.1.2 修复 Codex 保存 `\\?\C:\...` 扩展路径后，.NET 旧路径处理导致监听器退出、任务栏显示“状态不可用”的问题。监听器启用支持扩展路径和长路径的 .NET 文件处理。
 
 监听范围为当前用户同一 `CODEX_HOME` 下、正在被 Codex 加载的主聊天；默认目录为 `%USERPROFILE%\.codex`。若使用自定义目录，请在启动 TrafficMonitor 前设置相同的 `CODEX_HOME` 环境变量。远程机器或其他用户目录的任务不在此范围。
 
@@ -92,7 +94,7 @@ codex_path=C:\path\to\codex.exe
 python .\tests\monitor_integration.py
 ```
 
-该测试只创建隔离的模拟数据库和测试进程，不修改真实 Codex 数据。v0.1.1 还在真实账户、当前桌面任务和 TrafficMonitor 中完成加载验证，并实测连续四秒悬停无隐藏或重新弹出。
+该测试只创建隔离的模拟数据库和测试进程，不修改真实 Codex 数据，并包含 Windows 扩展路径用例。v0.1.2 在旧程序上复现该用例失败，修复后通过；真实桌面同时识别两个活动主聊天，监听心跳正常，连续四秒悬停无隐藏或重新弹出。
 
 ## 常见问题
 

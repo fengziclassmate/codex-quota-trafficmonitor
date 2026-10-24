@@ -145,7 +145,7 @@ public static partial class Bridge
             process = new Process { StartInfo = new ProcessStartInfo(FindCodex(codex), "app-server --listen stdio://") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 } };
             process.Start();
             errors = process.StandardError.ReadToEndAsync();
-            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.1.1" } });
+            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.1.2" } });
             process.StandardInput.WriteLine("{\"method\":\"initialized\",\"params\":{}}");
             process.StandardInput.Flush();
             var result = Rpc(process, 2, "account/rateLimits/read", new { });
