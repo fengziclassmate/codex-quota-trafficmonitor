@@ -2,6 +2,8 @@ LIBRARY user32.dll
 EXPORTS
 CallWindowProcW
 EnumWindows
+DrawTextW
+FindWindowW
 GetAncestor
 GetClassNameW
 GetParent
@@ -9,5 +11,7 @@ GetWindowLongPtrW
 GetWindowThreadProcessId
 IsWindow
 MessageBoxW
+PostMessageW
+SendMessageW
 SetWindowLongPtrW
 wsprintfW

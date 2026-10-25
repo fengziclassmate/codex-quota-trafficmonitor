@@ -1,0 +1,7 @@
+LIBRARY gdi32.dll
+EXPORTS
+GetTextExtentPoint32W
+RestoreDC
+SaveDC
+SetBkMode
+SetTextColor

@@ -29,17 +29,17 @@ public static partial class Bridge
         if (thinking > 0) counts.Add("思考 " + thinking);
         if (input > 0) counts.Add("等待 " + input);
         if (approval > 0) counts.Add("批准/执行 " + approval);
-        var lines = new List<string> { "任务：" + (active == 0 ? label : string.Join(" · ", counts)) };
+        var lines = new List<string> { "任务：" + (active == 0 ? label : string.Join("  ", counts)) };
         var busy = all.Where(a => a.Phase == "running" || a.Phase == "thinking" || a.Phase == "waiting_input" || a.Phase == "waiting_approval").ToArray();
         foreach (var item in busy.Take(3))
         {
             string title = Flat(item.Title);
             if (title.Length > 36) title = title.Substring(0, 36) + "…";
             string phase = item.Phase == "running" ? "运行" : item.Phase == "thinking" ? "思考" : item.Phase == "waiting_approval" ? "批准/执行" : "等待";
-            lines.Add("· " + title + "（" + phase + "）");
+            lines.Add(title + "（" + phase + "）");
         }
         if (busy.Length > 3) lines.Add("另有 " + (busy.Length - 3) + " 项活动任务");
-        return new Dictionary<string, string> { { "label", label }, { "tooltip", string.Join("\u2028", lines) }, { "active", active.ToString() }, { "running", running.ToString() }, { "thinking", thinking.ToString() }, { "waiting", waiting.ToString() }, { "active_ids", string.Join(",", busy.Select(a => a.Id)) }, { "loaded", all.Length.ToString() } };
+        return new Dictionary<string, string> { { "label", label }, { "tooltip", string.Join("\u2028", lines) }, { "items_json", Json.Serialize(busy.Take(3).Select(a => new { title = Flat(a.Title), phase = a.Phase }).ToArray()) }, { "active", active.ToString() }, { "running", running.ToString() }, { "thinking", thinking.ToString() }, { "waiting", waiting.ToString() }, { "active_ids", string.Join(",", busy.Select(a => a.Id)) }, { "loaded", all.Length.ToString() } };
     }
 
     sealed class Catalog : IDisposable

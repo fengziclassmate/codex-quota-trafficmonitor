@@ -17,9 +17,13 @@ static class Tests
         Check(quota["tooltip"].Contains("可用重置次数：2"), "use authoritative reset count");
         Check(quota["tooltip"].Contains("到期时间：") && quota["tooltip"].Contains("重置明细：1/2"), "show expiry and partial-credit details");
         Check(!quota["tooltip"].Contains("所有时间") && !quota["tooltip"].Contains("状态来自"), "only Codex data in tooltip");
+        var cycle = (Dictionary<string, object>)((object[])Json.DeserializeObject(quota["cycles_json"]))[0];
+        Check((string)cycle["remaining"] == "19%" && Convert.ToDouble(cycle["percent"]) == 19, "panel percentage agrees with taskbar");
+        Check(quota["reset_count"] == "2" && quota["reset_expiries"] != "", "panel receives authoritative reset count and expiry");
         var missing = Bridge.FormatQuota(Parse("{\"rateLimits\":{\"primary\":{\"usedPercent\":0,\"resetsAt\":null}},\"rateLimitResetCredits\":null}"), 1792770000);
         Check(missing["remaining"] == "100%" && missing["reset_at"] == "0", "missing reset time is unknown");
         Check(missing["tooltip"].Contains("未知"), "unknown reset credits are not zero");
+        Check(missing["reset_count"] == "未知", "panel preserves unknown reset credits");
         bool rejected = false;
         try { Bridge.FormatQuota(Parse("{\"rateLimits\":{\"primary\":{\"usedPercent\":\"bad\"}}}"), 0); } catch (System.IO.InvalidDataException) { rejected = true; }
         Check(rejected, "reject invalid external percentages");
@@ -55,6 +59,9 @@ static class Tests
         aggregate = Bridge.FormatActivity(new[] { complete, busy, second }, 100);
         Check(aggregate["active"] == "2" && aggregate["active_ids"] == "two,three", "all active main chats are aggregated");
         Check(aggregate["tooltip"].Contains("Two") && aggregate["tooltip"].Contains("Three"), "display monitored chat titles");
+        Check(!aggregate["tooltip"].Contains("·"), "no middle-dot separators in the UI");
+        var taskRows = (object[])Json.DeserializeObject(aggregate["items_json"]);
+        Check(taskRows.Length == 2 && (string)((Dictionary<string, object>)taskRows[0])["phase"] == "running", "panel receives individual active tasks");
         Check(!aggregate["tooltip"].Contains("来源") && !aggregate["tooltip"].Contains("兼容"), "no implementation instructions in hover text");
         second.Phase = "waiting_input";
         aggregate = Bridge.FormatActivity(new[] { busy, second }, 100);

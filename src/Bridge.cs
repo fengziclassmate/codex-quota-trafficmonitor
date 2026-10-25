@@ -83,6 +83,7 @@ public static partial class Bridge
         var secondary = Object(Field(bucket, "secondary"));
         var windows = new[] { primary, secondary }.Where(w => w != null).ToArray();
         var percentages = new List<string>();
+        var cycles = new List<object>();
         var lines = new List<string> { "Codex 额度" };
         long nextReset = 0;
         foreach (var window in windows)
@@ -96,6 +97,7 @@ public static partial class Bridge
             object minutes = Field(window, "windowDurationMins");
             string duration = minutes == null ? "额度周期" : Duration(Convert.ToInt64(minutes));
             object reset = Field(window, "resetsAt");
+            cycles.Add(new { remaining = remaining, percent = Math.Max(0, 100 - percent), cycle = duration, reset = reset });
             lines.Add(duration + "：剩余 " + remaining);
             lines.Add("额度重置：" + TimeText(reset));
             if (reset != null)
@@ -111,6 +113,8 @@ public static partial class Bridge
             if (Field(credits, "unlimited") is bool && (bool)Field(credits, "unlimited")) lines.Add("Credits：不限额");
         }
         var resets = Object(Field(result, "rateLimitResetCredits"));
+        string resetCount = Text(Field(resets, "availableCount"));
+        var expiries = new List<string>();
         if (resets == null || Field(resets, "availableCount") == null) lines.Add("可用重置次数：未知");
         else
         {
@@ -120,13 +124,14 @@ public static partial class Bridge
             else foreach (object row in details)
             {
                 var credit = Object(row);
+                expiries.Add(TimeText(Field(credit, "expiresAt")));
                 lines.Add("到期时间：" + TimeText(Field(credit, "expiresAt")));
             }
             if (details != null && details.Length < Convert.ToInt32(Field(resets, "availableCount"))) lines.Add("重置明细：" + details.Length + "/" + Text(Field(resets, "availableCount")));
         }
         lines.Add("更新：" + DateTimeOffset.FromUnixTimeSeconds(now).ToLocalTime().ToString("HH:mm:ss"));
         lines.Add("下次更新：" + DateTimeOffset.FromUnixTimeSeconds(now + 120).ToLocalTime().ToString("HH:mm:ss"));
-        return new Dictionary<string, string> { { "remaining", percentages.Count == 0 ? "--" : string.Join("/", percentages) }, { "reset_at", nextReset.ToString() }, { "updated", now.ToString() }, { "tooltip", string.Join("\u2028", lines.Select(Flat)) }, { "error", "" } };
+        return new Dictionary<string, string> { { "remaining", percentages.Count == 0 ? "--" : string.Join("/", percentages) }, { "reset_at", nextReset.ToString() }, { "updated", now.ToString() }, { "tooltip", string.Join("\u2028", lines.Select(Flat)) }, { "cycles_json", Json.Serialize(cycles) }, { "reset_count", resetCount == "" ? "未知" : resetCount }, { "reset_expiries", string.Join("\u2028", expiries) }, { "error", "" } };
     }
 
     static string Duration(long minutes)
@@ -145,7 +150,7 @@ public static partial class Bridge
             process = new Process { StartInfo = new ProcessStartInfo(FindCodex(codex), "app-server --listen stdio://") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 } };
             process.Start();
             errors = process.StandardError.ReadToEndAsync();
-            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.1.2" } });
+            Rpc(process, 1, "initialize", new { clientInfo = new { name = "codex_quota_trafficmonitor", title = "Codex Quota", version = "0.2.0" } });
             process.StandardInput.WriteLine("{\"method\":\"initialized\",\"params\":{}}");
             process.StandardInput.Flush();
             var result = Rpc(process, 2, "account/rateLimits/read", new { });
@@ -402,12 +407,14 @@ public static partial class Bridge
         return 0;
     }
 
+    [STAThread]
     public static int Main(string[] args)
     {
         try
         {
             if (args.Length == 1 && args[0] == "enable") return ConfigureHooks(true);
             if (args.Length == 1 && args[0] == "disable") return ConfigureHooks(false);
+            if (args.Length == 4 && args[0] == "panel") return Panel(int.Parse(args[1], CultureInfo.InvariantCulture), new IntPtr(long.Parse(args[2], NumberStyles.HexNumber, CultureInfo.InvariantCulture)), args[3] == "1");
             if (args.Length == 2 && args[0] == "monitor") return Monitor(int.Parse(args[1], CultureInfo.InvariantCulture));
             if (args.Length == 3 && args[0] == "watch") return Watch(args[1], int.Parse(args[2], CultureInfo.InvariantCulture));
             if (args.Length > 0 && args[0] == "quota") return Quota(args[1], args.Length > 2 ? args[2] : "");

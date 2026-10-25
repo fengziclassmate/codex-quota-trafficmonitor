@@ -7,7 +7,7 @@ $pluginDirectory = Join-Path (Split-Path -Parent $PSScriptRoot) 'plugins'
 New-Item -ItemType Directory -Path $buildDirectory, $pluginDirectory -Force | Out-Null
 $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $buildDirectory 'zig-cache'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll "/out:$buildDirectory\CodexQuotaBridge.exe" "$PSScriptRoot\Bridge.cs" "$PSScriptRoot\Monitor.cs"
+& $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll "/out:$buildDirectory\CodexQuotaBridge.exe" "$PSScriptRoot\Bridge.cs" "$PSScriptRoot\Monitor.cs" "$PSScriptRoot\QuotaPanel.cs"
 if ($LASTEXITCODE -ne 0) { throw 'C# compilation failed.' }
 & $compiler /nologo /target:exe /platform:x64 /optimize+ /r:System.Web.Extensions.dll "/r:$buildDirectory\CodexQuotaBridge.exe" "/out:$buildDirectory\Tests.exe" "$PSScriptRoot\Tests.cs"
 if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed.' }
@@ -19,7 +19,9 @@ if ($LASTEXITCODE -ne 0) { throw 'C++ compilation failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Kernel32 import library failed.' }
 & $zigExecutable dlltool -m i386:x86-64 -d "$PSScriptRoot\user32.def" -l "$buildDirectory\user32.lib"
 if ($LASTEXITCODE -ne 0) { throw 'User32 import library failed.' }
-& $zigExecutable c++ -target x86_64-windows-msvc -nostdlib -shared "$buildDirectory\CodexQuota.obj" "$buildDirectory\kernel32.lib" "$buildDirectory\user32.lib" '-Wl,--entry,DllMain' -o "$buildDirectory\CodexQuota.dll"
+& $zigExecutable dlltool -m i386:x86-64 -d "$PSScriptRoot\gdi32.def" -l "$buildDirectory\gdi32.lib"
+if ($LASTEXITCODE -ne 0) { throw 'Gdi32 import library failed.' }
+& $zigExecutable c++ -target x86_64-windows-msvc -nostdlib -shared "$buildDirectory\CodexQuota.obj" "$buildDirectory\kernel32.lib" "$buildDirectory\user32.lib" "$buildDirectory\gdi32.lib" '-Wl,--entry,DllMain' -o "$buildDirectory\CodexQuota.dll"
 if ($LASTEXITCODE -ne 0) { throw 'DLL link failed.' }
 Copy-Item -LiteralPath "$buildDirectory\CodexQuota.dll", "$buildDirectory\CodexQuotaBridge.exe" -Destination $pluginDirectory -Force
 Write-Output "Built plugin: $pluginDirectory"

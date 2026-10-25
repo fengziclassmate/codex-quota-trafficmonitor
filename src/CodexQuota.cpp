@@ -33,11 +33,11 @@ static DWORD viewTls;
 
 struct View { View* next; wchar_t value[3][128]; wchar_t tooltip[8192]; };
 static View* views;
-static HWND tipWindow;
-static WNDPROC originalTipProc;
-static wchar_t tipText[2][8192], activityText[4096];
-static int tipIndex;
-static bool tipSized;
+static HWND tipWindow, taskbarWindow;
+static HANDLE panelChild;
+static ULONGLONG panelAttempt;
+static wchar_t activityText[4096];
+static void StartPanel(HWND anchor, bool pinned);
 
 static View* CurrentView() {
     auto view = static_cast<View*>(TlsGetValue(viewTls));
@@ -64,45 +64,24 @@ static unsigned long long Number(const wchar_t* text) {
     return number;
 }
 
-static LRESULT CALLBACK TooltipProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    WNDPROC original = originalTipProc;
-    if (message == TTM_UPDATETIPTEXTW) {
-        AcquireSRWLockShared(&stateLock);
-        bool unchanged = !lstrcmpW(tipText[tipIndex], tooltip);
-        int next = unchanged ? tipIndex : 1 - tipIndex;
-        if (!unchanged) lstrcpynW(tipText[next], tooltip, 8192);
-        ReleaseSRWLockShared(&stateLock);
-        auto source = reinterpret_cast<TOOLINFOW*>(lParam);
-        TOOLINFOW info{};
-        memcpy(&info, source, source->cbSize < sizeof(info) ? source->cbSize : sizeof(info));
-        info.lpszText = tipText[next];
-        if (!tipSized) { CallWindowProcW(original, window, TTM_SETMAXTIPWIDTH, 0, 440); tipSized = true; }
-        LRESULT result = CallWindowProcW(original, window, message, wParam, reinterpret_cast<LPARAM>(&info));
-        tipIndex = next;
-        return result;
-    }
-    LRESULT result = CallWindowProcW(original, window, message, wParam, lParam);
-    if (message == WM_NCDESTROY && window == tipWindow) { tipWindow = nullptr; originalTipProc = nullptr; tipText[0][0] = tipText[1][0] = 0; tipSized = false; }
-    return result;
-}
-
 static BOOL CALLBACK FindTooltip(HWND window, LPARAM) {
     DWORD process = 0; GetWindowThreadProcessId(window, &process);
     if (process != GetCurrentProcessId()) return TRUE;
     wchar_t name[64]; GetClassNameW(window, name, 64);
     if (lstrcmpW(name, L"tooltips_class32")) return TRUE;
     HWND owner = GetParent(window);
-    HWND root = GetAncestor(owner, GA_ROOT);
-    GetClassNameW(root, name, 64);
+    GetClassNameW(GetAncestor(owner, GA_ROOT), name, 64);
     if (lstrcmpW(name, L"Shell_TrayWnd") && lstrcmpW(name, L"Shell_SecondaryTrayWnd")) return TRUE;
-    originalTipProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window, GWLP_WNDPROC));
-    if (!originalTipProc) return TRUE;
-    if (!SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TooltipProcedure))) { originalTipProc = nullptr; return TRUE; }
-    tipWindow = window;
+    tipWindow = window; taskbarWindow = owner;
+    SendMessageW(window, TTM_ACTIVATE, FALSE, 0);
+    StartPanel(owner, false);
     return FALSE;
 }
 
-static void InstallTooltip() { if (!IsWindow(tipWindow)) EnumWindows(FindTooltip, 0); }
+static void InstallTooltip() {
+    if (!IsWindow(tipWindow)) EnumWindows(FindTooltip, 0);
+    else StartPanel(taskbarWindow, false);
+}
 
 static unsigned long long Now() {
     FILETIME value;
@@ -117,6 +96,28 @@ static void Join(wchar_t* out, const wchar_t* base, const wchar_t* name) {
     int length = lstrlenW(out);
     if (length && out[length - 1] != L'\\') { lstrcpynW(out + length, L"\\", 2048 - length); ++length; }
     lstrcpynW(out + length, name, 2048 - length);
+}
+
+static void StartPanel(HWND anchor, bool pinned) {
+    wchar_t caption[96]; wsprintfW(caption, L"CodexQuota.Panel.%lu", GetCurrentProcessId());
+    HWND panel = FindWindowW(nullptr, caption);
+    if (panel) { if (pinned) PostMessageW(panel, WM_APP + 91, 0, 0); return; }
+    if (panelChild) {
+        if (WaitForSingleObject(panelChild, 0) != WAIT_OBJECT_0) return;
+        CloseHandle(panelChild); panelChild = nullptr;
+    }
+    if (!pinned && panelAttempt && GetTickCount64() - panelAttempt < 30000) return;
+    auto storage = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 12288));
+    if (!storage) return;
+    wchar_t* executable = storage; wchar_t* command = storage + 2048;
+    Join(executable, directory, L"CodexQuotaBridge.exe");
+    wsprintfW(command, L"\"%s\" panel %lu %p %u", executable, GetCurrentProcessId(), anchor, pinned ? 1 : 0);
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (CreateProcessW(executable, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, directory, &startup, &process)) {
+        panelChild = process.hProcess; CloseHandle(process.hThread);
+    }
+    HeapFree(GetProcessHeap(), 0, storage); panelAttempt = GetTickCount64();
 }
 
 static bool OwnerAlive(const wchar_t* file) {
@@ -213,11 +214,43 @@ public:
         return view->value[index];
     }
     const wchar_t* GetItemValueSampleText() const override { return index == 0 ? L"100%/100%" : index == 1 ? L"批准/执行 99" : L"99天23时"; }
+    bool IsCustomDraw() const override { return true; }
+    int GetItemWidth() const override {
+        AcquireSRWLockShared(&stateLock);
+        int width = index == 0 ? (lstrlenW(values[0]) > 5 ? 126 : 76) : index == 1 ? (lstrlenW(values[1]) > 7 ? 92 : 72) : 92;
+        ReleaseSRWLockShared(&stateLock); return width;
+    }
+    void DrawItem(void* context, int x, int y, int w, int h, bool dark) override {
+        HDC dc = static_cast<HDC>(context); int saved = SaveDC(dc); SetBkMode(dc, TRANSPARENT);
+        RECT rect { x, y, x + w, y + h };
+        constexpr UINT format = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
+        wchar_t value[128];
+        AcquireSRWLockShared(&stateLock); lstrcpynW(value, values[index], 128); ReleaseSRWLockShared(&stateLock);
+        unsigned long foreground = dark ? RGB(238,238,238) : RGB(32,32,32);
+        unsigned long muted = dark ? RGB(180,180,180) : RGB(100,100,100);
+        unsigned long accent = dark ? RGB(11,216,182) : RGB(13,61,56);
+        unsigned long warning = dark ? RGB(255,202,22) : RGB(79,52,34);
+        if (index == 1) {
+            wchar_t compact[128]; const wchar_t* display = value;
+            if (value[0] == L'运' && value[1] == L'行' && value[2] == L'中') { wsprintfW(compact, L"运行%s", value + 3); display = compact; }
+            else if (value[0] == L'思' && value[1] == L'考' && value[2] == L'中') { wsprintfW(compact, L"思考%s", value + 3); display = compact; }
+            bool waiting = value[0] == L'等' || value[0] == L'批' || value[0] == L'状';
+            SetTextColor(dc, waiting ? warning : !lstrcmpW(value, L"空闲") ? muted : accent);
+            DrawTextW(dc, display, -1, &rect, format | DT_CENTER);
+        }
+        else {
+            const wchar_t* label = index == 0 ? L"Codex " : L"重置 ";
+            SIZE size{}; GetTextExtentPoint32W(dc, label, lstrlenW(label), &size);
+            SetTextColor(dc, index == 0 ? foreground : muted);
+            DrawTextW(dc, label, -1, &rect, format);
+            rect.left += size.cx; SetTextColor(dc, index == 0 ? accent : muted);
+            DrawTextW(dc, value, -1, &rect, format);
+        }
+        RestoreDC(dc, saved);
+    }
     int OnMouseEvent(MouseEventType type, int, int, void* window, int) override {
         if (type != MT_LCLICKED) return 0;
-        View* view = CurrentView(); if (!view) return 0;
-        AcquireSRWLockShared(&stateLock); lstrcpynW(view->tooltip, tooltip, 8192); ReleaseSRWLockShared(&stateLock);
-        MessageBoxW(static_cast<HWND>(window), view->tooltip, L"Codex 状态与额度", MB_OK | MB_ICONINFORMATION);
+        StartPanel(static_cast<HWND>(window), true);
         return 1;
     }
 };
@@ -231,7 +264,7 @@ public:
         case TMI_NAME: return L"Codex 状态与额度";
         case TMI_DESCRIPTION: return L"ChatGPT 订阅额度、重置时间与次数，以及 Codex 生命周期状态";
         case TMI_AUTHOR: return L"Local Codex Quota";
-        case TMI_VERSION: return L"0.1.2";
+        case TMI_VERSION: return L"0.2.0";
         default: return L"";
         }
     }
@@ -318,6 +351,7 @@ extern "C" __declspec(dllexport) ITMPlugin* TMPluginGetInstance() {
 extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) module = instance;
     if (reason == DLL_PROCESS_DETACH) {
+        if (panelChild) { TerminateProcess(panelChild, 0); CloseHandle(panelChild); }
         if (monitorChild) { TerminateProcess(monitorChild, 0); CloseHandle(monitorChild); }
         if (childJob) CloseHandle(childJob);
         if (child) CloseHandle(child);
